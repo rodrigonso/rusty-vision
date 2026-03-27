@@ -7,7 +7,7 @@ use image::RgbaImage;
 use serde::Serialize;
 
 #[derive(Serialize)]
-struct ScreenshotOutput {
+struct ScreenshotOutput<T: Serialize> {
     width: u32,
     height: u32,
     format: String,
@@ -15,6 +15,8 @@ struct ScreenshotOutput {
     image_base64: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tree: Option<T>,
 }
 
 fn encode_png(img: &RgbaImage) -> Result<Vec<u8>> {
@@ -31,7 +33,7 @@ fn encode_png(img: &RgbaImage) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
-pub fn emit(img: RgbaImage, output_path: Option<String>, raw: bool) -> Result<()> {
+pub fn emit(img: RgbaImage, output_path: Option<String>, raw: bool, tree: Option<impl Serialize>) -> Result<()> {
     let png_bytes = encode_png(&img)?;
 
     if raw {
@@ -54,6 +56,7 @@ pub fn emit(img: RgbaImage, output_path: Option<String>, raw: bool) -> Result<()
             format: "png".into(),
             image_base64: None,
             file: Some(path),
+            tree,
         };
         println!("{}", serde_json::to_string_pretty(&output)?);
         eprintln!("Screenshot saved.");
@@ -66,6 +69,7 @@ pub fn emit(img: RgbaImage, output_path: Option<String>, raw: bool) -> Result<()
             format: "png".into(),
             image_base64: Some(b64),
             file: None,
+            tree,
         };
         println!("{}", serde_json::to_string(&output)?);
     }
