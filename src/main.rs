@@ -2,6 +2,8 @@ mod capture;
 mod list;
 mod output;
 #[cfg(windows)]
+mod annotate;
+#[cfg(windows)]
 mod tree;
 
 use anyhow::{Context, Result};
@@ -80,18 +82,19 @@ fn main() -> Result<()> {
         } => {
             if full_screen {
                 let img = capture::capture_full_screen(monitor)?;
-                output::emit(img, output, raw, None::<serde_json::Value>)
+                output::emit(img, output, raw, None::<serde_json::Value>, None)
             } else if let Some(exe_path) = launch {
                 let before = capture::snapshot_windows();
                 let mut child = launch_app(&exe_path)?;
                 let child_pid = child.id();
                 let mut window_handle: Option<u32> = None;
                 let result = (|| {
-                    let (img, window_pid, window_id) =
+                    let (img, window_pid, window_id, geom) =
                         capture::wait_and_capture_new_window(child_pid, &before)?;
                     window_handle = Some(window_id);
-                    let tree_data = maybe_inspect_tree(tree, window_pid, tree_depth)?;
-                    output::emit(img, output, raw, tree_data)
+                    let (tree_data, annotated) =
+                        maybe_inspect_tree(tree, &img, window_pid, tree_depth, &geom)?;
+                    output::emit(img, output, raw, tree_data, annotated)
                 })();
                 // Close the specific window we opened
                 if let Some(hwnd) = window_handle {
@@ -104,13 +107,15 @@ fn main() -> Result<()> {
                 }
                 result
             } else if let Some(title) = window {
-                let (img, captured_pid, _) = capture::capture_by_title(&title)?;
-                let tree_data = maybe_inspect_tree(tree, captured_pid, tree_depth)?;
-                output::emit(img, output, raw, tree_data)
+                let (img, captured_pid, _, geom) = capture::capture_by_title(&title)?;
+                let (tree_data, annotated) =
+                    maybe_inspect_tree(tree, &img, captured_pid, tree_depth, &geom)?;
+                output::emit(img, output, raw, tree_data, annotated)
             } else if let Some(pid) = pid {
-                let (img, window_pid, _) = capture::capture_by_pid(pid)?;
-                let tree_data = maybe_inspect_tree(tree, window_pid, tree_depth)?;
-                output::emit(img, output, raw, tree_data)
+                let (img, window_pid, _, geom) = capture::capture_by_pid(pid)?;
+                let (tree_data, annotated) =
+                    maybe_inspect_tree(tree, &img, window_pid, tree_depth, &geom)?;
+                output::emit(img, output, raw, tree_data, annotated)
             } else {
                 anyhow::bail!(
                     "Specify --full-screen, --window <title>, --pid <id>, or --launch <exe>.\n\
@@ -124,27 +129,33 @@ fn main() -> Result<()> {
 #[cfg(windows)]
 fn maybe_inspect_tree(
     enabled: bool,
+    img: &image::RgbaImage,
     pid: u32,
     max_depth: Option<usize>,
-) -> Result<Option<tree::TreeNode>> {
+    geom: &capture::WindowGeometry,
+) -> Result<(Option<tree::TreeNode>, Option<image::RgbaImage>)> {
     if !enabled {
-        return Ok(None);
+        return Ok((None, None));
     }
     eprintln!("Inspecting UI tree for pid {pid}...");
-    let node = tree::inspect_tree(pid, max_depth)?;
-    Ok(Some(node))
+    let mut node = tree::inspect_tree(pid, max_depth)?;
+    tree::assign_ids(&mut node);
+    let annotated = annotate::annotate(img, &node, geom);
+    Ok((Some(node), Some(annotated)))
 }
 
 #[cfg(not(windows))]
 fn maybe_inspect_tree(
     enabled: bool,
+    _img: &image::RgbaImage,
     _pid: u32,
     _max_depth: Option<usize>,
-) -> Result<Option<serde_json::Value>> {
+    _geom: &capture::WindowGeometry,
+) -> Result<(Option<serde_json::Value>, Option<image::RgbaImage>)> {
     if enabled {
         anyhow::bail!("--tree is only supported on Windows");
     }
-    Ok(None)
+    Ok((None, None))
 }
 
 fn launch_app(exe_path: &str) -> Result<Child> {

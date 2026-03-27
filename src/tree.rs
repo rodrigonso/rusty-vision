@@ -5,14 +5,16 @@ use uiautomation::{UIAutomation, UIElement, UITreeWalker};
 
 #[derive(Debug, Serialize)]
 pub struct BoundingRect {
-    x: i32,
-    y: i32,
-    width: i32,
-    height: i32,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
 }
 
 #[derive(Debug, Serialize)]
 pub struct TreeNode {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<u32>,
     role: String,
     name: String,
     class_name: String,
@@ -108,6 +110,7 @@ fn walk_element(
     };
 
     Ok(TreeNode {
+        id: None,
         role,
         name,
         class_name,
@@ -115,6 +118,52 @@ fn walk_element(
         is_enabled,
         children,
     })
+}
+
+/// Assign sequential IDs to all nodes via depth-first traversal.
+pub fn assign_ids(node: &mut TreeNode) {
+    let mut counter = 0u32;
+    assign_ids_recursive(node, &mut counter);
+}
+
+fn assign_ids_recursive(node: &mut TreeNode, counter: &mut u32) {
+    node.id = Some(*counter);
+    *counter += 1;
+    for child in &mut node.children {
+        assign_ids_recursive(child, counter);
+    }
+}
+
+/// Collect all nodes that should be annotated (actionable elements with visible bounding rects).
+pub fn collect_annotatable_nodes(node: &TreeNode) -> Vec<(u32, &BoundingRect, &str, &str)> {
+    let mut result = Vec::new();
+    collect_recursive(node, &mut result);
+    result
+}
+
+const ACTIONABLE_ROLES: &[&str] = &[
+    "button", "menu item", "menu bar", "split button", "tab item",
+    "combo box", "text", "edit", "document", "slider", "check box",
+    "radio button", "link", "list item", "tree item", "app bar button",
+    "toggle button", "custom", "group",
+];
+
+fn is_actionable(role: &str) -> bool {
+    ACTIONABLE_ROLES.iter().any(|&r| r == role)
+}
+
+fn collect_recursive<'a>(
+    node: &'a TreeNode,
+    result: &mut Vec<(u32, &'a BoundingRect, &'a str, &'a str)>,
+) {
+    if let (Some(id), Some(rect)) = (node.id, &node.bounding_rect) {
+        if is_actionable(&node.role) && rect.width > 0 && rect.height > 0 {
+            result.push((id, rect, &node.role, &node.name));
+        }
+    }
+    for child in &node.children {
+        collect_recursive(child, result);
+    }
 }
 
 fn collect_children(
