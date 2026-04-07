@@ -1,6 +1,5 @@
 use anyhow::{Context, Result, bail};
 use image::RgbaImage;
-use std::time::{Duration, Instant};
 use xcap::{Monitor, Window};
 
 /// Read pixel data from an HBITMAP into an RGBA buffer.
@@ -162,7 +161,7 @@ pub fn capture_by_title(title_query: &str) -> Result<(RgbaImage, u32, u32, Windo
     if matches.is_empty() {
         bail!(
             "No window found matching \"{title_query}\".\n\
-             Run `rusty-vision list-windows` to see available windows."
+             Run `rusty-vision list` to see available windows."
         );
     }
 
@@ -201,7 +200,7 @@ pub fn capture_by_pid(pid: u32) -> Result<(RgbaImage, u32, u32, WindowGeometry)>
     if matches.is_empty() {
         bail!(
             "No window found for PID {pid}.\n\
-             Run `rusty-vision list-windows` to see available windows."
+             Run `rusty-vision list` to see available windows."
         );
     }
 
@@ -285,64 +284,3 @@ fn capture_window(window: &Window) -> Result<(RgbaImage, u32, u32, WindowGeometr
     Ok((img, pid, id, geom))
 }
 
-const WINDOW_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
-const WINDOW_POLL_INTERVAL: Duration = Duration::from_millis(200);
-
-/// Snapshot current visible window IDs (handles).
-pub fn snapshot_windows() -> std::collections::HashSet<u32> {
-    Window::all()
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|w| w.id().ok())
-        .collect()
-}
-
-/// Wait for a new window that wasn't in `before`, then capture it.
-/// Returns (image, pid, window_id) so the caller can close the specific window.
-pub fn wait_and_capture_new_window(
-    spawned_pid: u32,
-    before: &std::collections::HashSet<u32>,
-) -> Result<(RgbaImage, u32, u32, WindowGeometry)> {
-    eprintln!("Waiting for new window to appear...");
-    let start = Instant::now();
-
-    // Brief delay to let the app initialize and skip transient popups
-    std::thread::sleep(Duration::from_secs(2));
-
-    loop {
-        let windows = Window::all().unwrap_or_default();
-
-        let candidates: Vec<Window> = windows
-            .into_iter()
-            .filter(|w| {
-                let title = w.title().unwrap_or_default();
-                let id = w.id().unwrap_or(0);
-                !title.is_empty()
-                    && !title.contains("PopupHost")
-                    && !w.is_minimized().unwrap_or(true)
-                    && w.width().unwrap_or(0) > 200
-                    && w.height().unwrap_or(0) > 200
-                    && (w.pid().unwrap_or(0) == spawned_pid || !before.contains(&id))
-            })
-            .collect();
-
-        // Prefer a window from the spawned PID, otherwise take the first new one
-        let best = candidates
-            .iter()
-            .find(|w| w.pid().unwrap_or(0) == spawned_pid)
-            .or(candidates.first());
-
-        if let Some(window) = best {
-            return capture_window(window);
-        }
-
-        if start.elapsed() > WINDOW_WAIT_TIMEOUT {
-            bail!(
-                "Timed out waiting for application window after {}s.",
-                WINDOW_WAIT_TIMEOUT.as_secs()
-            );
-        }
-
-        std::thread::sleep(WINDOW_POLL_INTERVAL);
-    }
-}

@@ -7,9 +7,10 @@ AI coding agents typically operate in a text-only world. **rusty-vision** bridge
 ## Features
 
 - **List windows** — enumerate all visible windows with title, PID, position, and size as JSON.
-- **Capture by window title** — partial, case-insensitive match.
+- **Capture by window title** — positional argument with partial, case-insensitive match.
 - **Capture by PID** — target a specific process.
 - **Full-screen capture** — capture an entire monitor by index.
+- **Auto-downscale** — images wider than `--max-width` (default 1920) are downscaled preserving aspect ratio.
 - **Flexible output** — base64 JSON to stdout (default), raw PNG to stdout for piping, or save to a file.
 
 ## Prerequisites
@@ -36,25 +37,28 @@ The binary is output to `target/debug/rusty-vision` or `target/release/rusty-vis
 
 ```sh
 # List all visible windows as JSON
-rusty-vision list-windows
+rusty-vision list
 
 # Capture a window by title (partial match)
-rusty-vision capture --window "Firefox"
+rusty-vision capture "Firefox"
 
 # Capture a window by PID
 rusty-vision capture --pid 1234
 
 # Capture the full screen (primary monitor)
-rusty-vision capture --full-screen
+rusty-vision capture --screen
 
 # Capture a secondary monitor (0-indexed)
-rusty-vision capture --full-screen --monitor 1
+rusty-vision capture --screen --monitor 1
 
 # Save to a file instead of printing base64
-rusty-vision capture --window "Code" --output screenshot.png
+rusty-vision capture "Code" --output screenshot.png
+
+# Disable auto-downscaling (capture at native resolution)
+rusty-vision capture "Code" --max-width 0
 
 # Pipe raw PNG bytes to another tool
-rusty-vision capture --full-screen --raw | feh -
+rusty-vision capture --screen --raw | feh -
 ```
 
 ### Output format

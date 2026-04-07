@@ -8,9 +8,9 @@ rusty-vision is a Rust CLI tool that captures screenshots of windows and screens
 
 ```sh
 cargo build
-cargo run -- list-windows
-cargo run -- capture --full-screen
-cargo run -- capture --window "Firefox"
+cargo run -- list
+cargo run -- capture --screen
+cargo run -- capture "Firefox"
 cargo run -- capture --pid 1234 --output screenshot.png
 ```
 
@@ -18,7 +18,7 @@ There are no tests yet. When adding tests, use `cargo test` and `cargo test <tes
 
 ## Architecture
 
-The CLI uses **clap derive** for argument parsing with two subcommands: `list-windows` and `capture`. The code is split into three modules by responsibility:
+The CLI uses **clap derive** for argument parsing with two subcommands: `list` and `capture`. The code is split into three modules by responsibility:
 
 - **`capture`** — Screen/window capture logic via `xcap`. Three entry points: `capture_full_screen`, `capture_by_title`, `capture_by_pid`. All return `RgbaImage`.
 - **`output`** — Encodes the captured `RgbaImage` to PNG and handles the three output modes: JSON with base64 (default), file save, or raw bytes to stdout.

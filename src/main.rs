@@ -6,10 +6,9 @@ mod annotate;
 #[cfg(windows)]
 mod tree;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 use image::RgbaImage;
-use std::process::{Child, Command, Stdio};
 
 #[derive(Parser)]
 #[command(name = "rusty-vision")]
@@ -23,27 +22,22 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// List all capturable windows with their metadata
-    ListWindows,
+    List,
 
     /// Capture a screenshot of a window or the full screen
     Capture {
-        /// Capture the full screen instead of a specific window
-        #[arg(long)]
-        full_screen: bool,
-
-        /// Capture a window by title (partial, case-insensitive match)
-        #[arg(long, conflicts_with = "full_screen")]
+        /// Window title to capture (partial, case-insensitive match)
         window: Option<String>,
 
+        /// Capture the full screen instead of a specific window
+        #[arg(long, conflicts_with = "window")]
+        screen: bool,
+
         /// Capture a window by process ID
-        #[arg(long, conflicts_with_all = ["full_screen", "window"])]
+        #[arg(long, conflicts_with_all = ["screen", "window"])]
         pid: Option<u32>,
 
-        /// Launch an application, capture its window, then close it
-        #[arg(long, conflicts_with_all = ["full_screen", "window", "pid"])]
-        launch: Option<String>,
-
-        /// Which monitor to capture (0-indexed, default: 0). Only used with --full-screen
+        /// Which monitor to capture (0-indexed, default: 0). Only used with --screen
         #[arg(long, default_value = "0")]
         monitor: usize,
 
@@ -55,18 +49,17 @@ enum Commands {
         #[arg(long, conflicts_with = "output")]
         raw: bool,
 
-        /// Maximum image width in pixels. Images wider than this are downscaled
-        /// preserving aspect ratio. Use 0 to disable. (default: 1920)
+        /// Maximum image width in pixels (downscaled preserving aspect ratio, 0 to disable)
         #[arg(long, default_value = "1920")]
         max_width: u32,
 
         /// Include the UI element tree in the output (Windows only)
-        #[arg(long, conflicts_with = "full_screen")]
+        #[arg(long, conflicts_with = "screen")]
         tree: bool,
 
-        /// Maximum depth for UI tree traversal (default: unlimited). Only used with --tree
+        /// Maximum depth for UI tree traversal (default: unlimited)
         #[arg(long, requires = "tree")]
-        tree_depth: Option<usize>,
+        depth: Option<usize>,
     },
 }
 
@@ -88,69 +81,42 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::ListWindows => list::list_windows(),
+        Commands::List => list::list_windows(),
         Commands::Capture {
-            full_screen,
             window,
+            screen,
             pid,
-            launch,
             monitor,
             output,
             raw,
             max_width,
             tree,
-            tree_depth,
+            depth,
         } => {
-            // max_width of 0 means disabled
             let mw = if max_width > 0 { Some(max_width) } else { None };
 
-            if full_screen {
+            if screen {
                 let img = capture::capture_full_screen(monitor)?;
                 let img = downscale(img, mw);
                 output::emit(img, output, raw, None::<serde_json::Value>, None)
-            } else if let Some(exe_path) = launch {
-                let before = capture::snapshot_windows();
-                let mut child = launch_app(&exe_path)?;
-                let child_pid = child.id();
-                let mut window_handle: Option<u32> = None;
-                let result = (|| {
-                    let (img, window_pid, window_id, geom) =
-                        capture::wait_and_capture_new_window(child_pid, &before)?;
-                    window_handle = Some(window_id);
-                    let (tree_data, annotated) =
-                        maybe_inspect_tree(tree, &img, window_pid, tree_depth, &geom)?;
-                    let img = downscale(img, mw);
-                    let annotated = annotated.map(|a| downscale(a, mw));
-                    output::emit(img, output, raw, tree_data, annotated)
-                })();
-                // Close the specific window we opened
-                if let Some(hwnd) = window_handle {
-                    close_window(hwnd);
-                }
-                // Kill the spawned process if still alive
-                if child.try_wait().ok().flatten().is_none() {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                }
-                result
             } else if let Some(title) = window {
                 let (img, captured_pid, _, geom) = capture::capture_by_title(&title)?;
                 let (tree_data, annotated) =
-                    maybe_inspect_tree(tree, &img, captured_pid, tree_depth, &geom)?;
+                    maybe_inspect_tree(tree, &img, captured_pid, depth, &geom)?;
                 let img = downscale(img, mw);
                 let annotated = annotated.map(|a| downscale(a, mw));
                 output::emit(img, output, raw, tree_data, annotated)
             } else if let Some(pid) = pid {
                 let (img, window_pid, _, geom) = capture::capture_by_pid(pid)?;
                 let (tree_data, annotated) =
-                    maybe_inspect_tree(tree, &img, window_pid, tree_depth, &geom)?;
+                    maybe_inspect_tree(tree, &img, window_pid, depth, &geom)?;
                 let img = downscale(img, mw);
                 let annotated = annotated.map(|a| downscale(a, mw));
                 output::emit(img, output, raw, tree_data, annotated)
             } else {
                 anyhow::bail!(
-                    "Specify --full-screen, --window <title>, --pid <id>, or --launch <exe>.\n\
-                     Run `rusty-vision list-windows` to see available windows."
+                    "Specify a window title, --pid <id>, or --screen.\n\
+                     Run `rusty-vision list` to see available windows."
                 );
             }
         }
@@ -187,33 +153,5 @@ fn maybe_inspect_tree(
         anyhow::bail!("--tree is only supported on Windows");
     }
     Ok((None, None))
-}
-
-fn launch_app(exe_path: &str) -> Result<Child> {
-    eprintln!("Launching {exe_path}...");
-    Command::new(exe_path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .with_context(|| format!("Failed to launch \"{exe_path}\""))
-}
-
-/// Send WM_CLOSE to a specific window handle to close just that window.
-#[cfg(windows)]
-fn close_window(hwnd: u32) {
-    use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-    use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE};
-
-    eprintln!("Closing launched window (hwnd: {hwnd})...");
-    let hwnd = HWND(hwnd as *mut std::ffi::c_void);
-    unsafe {
-        let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
-    }
-}
-
-#[cfg(not(windows))]
-fn close_window(_hwnd: u32) {
-    // No-op on non-Windows; the child process kill handles cleanup
 }
 
