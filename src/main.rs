@@ -8,6 +8,7 @@ mod tree;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use image::RgbaImage;
 use std::process::{Child, Command, Stdio};
 
 #[derive(Parser)]
@@ -54,6 +55,11 @@ enum Commands {
         #[arg(long, conflicts_with = "output")]
         raw: bool,
 
+        /// Maximum image width in pixels. Images wider than this are downscaled
+        /// preserving aspect ratio. Use 0 to disable. (default: 1920)
+        #[arg(long, default_value = "1920")]
+        max_width: u32,
+
         /// Include the UI element tree in the output (Windows only)
         #[arg(long, conflicts_with = "full_screen")]
         tree: bool,
@@ -62,6 +68,20 @@ enum Commands {
         #[arg(long, requires = "tree")]
         tree_depth: Option<usize>,
     },
+}
+
+/// Downscale an image if it exceeds the max width, preserving aspect ratio.
+fn downscale(img: RgbaImage, max_width: Option<u32>) -> RgbaImage {
+    let Some(max_w) = max_width else {
+        return img;
+    };
+    if img.width() <= max_w {
+        return img;
+    }
+    let scale = max_w as f64 / img.width() as f64;
+    let new_h = (img.height() as f64 * scale).round() as u32;
+    eprintln!("Downscaling {}x{} → {}x{}", img.width(), img.height(), max_w, new_h);
+    image::imageops::resize(&img, max_w, new_h, image::imageops::FilterType::Lanczos3)
 }
 
 fn main() -> Result<()> {
@@ -77,11 +97,16 @@ fn main() -> Result<()> {
             monitor,
             output,
             raw,
+            max_width,
             tree,
             tree_depth,
         } => {
+            // max_width of 0 means disabled
+            let mw = if max_width > 0 { Some(max_width) } else { None };
+
             if full_screen {
                 let img = capture::capture_full_screen(monitor)?;
+                let img = downscale(img, mw);
                 output::emit(img, output, raw, None::<serde_json::Value>, None)
             } else if let Some(exe_path) = launch {
                 let before = capture::snapshot_windows();
@@ -94,6 +119,8 @@ fn main() -> Result<()> {
                     window_handle = Some(window_id);
                     let (tree_data, annotated) =
                         maybe_inspect_tree(tree, &img, window_pid, tree_depth, &geom)?;
+                    let img = downscale(img, mw);
+                    let annotated = annotated.map(|a| downscale(a, mw));
                     output::emit(img, output, raw, tree_data, annotated)
                 })();
                 // Close the specific window we opened
@@ -110,11 +137,15 @@ fn main() -> Result<()> {
                 let (img, captured_pid, _, geom) = capture::capture_by_title(&title)?;
                 let (tree_data, annotated) =
                     maybe_inspect_tree(tree, &img, captured_pid, tree_depth, &geom)?;
+                let img = downscale(img, mw);
+                let annotated = annotated.map(|a| downscale(a, mw));
                 output::emit(img, output, raw, tree_data, annotated)
             } else if let Some(pid) = pid {
                 let (img, window_pid, _, geom) = capture::capture_by_pid(pid)?;
                 let (tree_data, annotated) =
                     maybe_inspect_tree(tree, &img, window_pid, tree_depth, &geom)?;
+                let img = downscale(img, mw);
+                let annotated = annotated.map(|a| downscale(a, mw));
                 output::emit(img, output, raw, tree_data, annotated)
             } else {
                 anyhow::bail!(

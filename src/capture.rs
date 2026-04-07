@@ -3,17 +3,105 @@ use image::RgbaImage;
 use std::time::{Duration, Instant};
 use xcap::{Monitor, Window};
 
-/// Capture a screen region by BitBlt from the desktop DC.
-/// This captures everything visible at the given screen coordinates,
-/// including window title bars and chrome that PrintWindow may miss.
+/// Read pixel data from an HBITMAP into an RGBA buffer.
 #[cfg(windows)]
-fn capture_screen_region(x: i32, y: i32, width: u32, height: u32) -> Result<RgbaImage> {
+fn read_hbitmap(
+    hdc: windows::Win32::Graphics::Gdi::HDC,
+    hbitmap: windows::Win32::Graphics::Gdi::HBITMAP,
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>> {
     use std::mem;
+    use windows::Win32::Graphics::Gdi::{
+        GetDIBits, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS,
+    };
+
+    let mut bmi = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: width as i32,
+            biHeight: -(height as i32), // top-down
+            biPlanes: 1,
+            biBitCount: 32,
+            biSizeImage: width * height * 4,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let mut buf = vec![0u8; (width * height * 4) as usize];
+    unsafe {
+        GetDIBits(
+            hdc,
+            hbitmap,
+            0,
+            height,
+            Some(buf.as_mut_ptr().cast()),
+            &mut bmi,
+            DIB_RGB_COLORS,
+        );
+    }
+
+    // BGRA → RGBA
+    for pixel in buf.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+
+    Ok(buf)
+}
+
+/// Capture a window using PrintWindow with PW_RENDERFULLCONTENT.
+/// This captures only the target window (no bleed-through from overlapping windows)
+/// and correctly renders modern Windows 11 title bars and chrome.
+#[cfg(windows)]
+fn capture_window_printwindow(hwnd_raw: u32, width: u32, height: u32) -> Result<RgbaImage> {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::Graphics::Gdi::{
-        BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits,
-        GetWindowDC, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS,
-        SRCCOPY,
+        CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetWindowDC,
+        ReleaseDC, SelectObject,
+    };
+    use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
+
+    const PW_RENDERFULLCONTENT: u32 = 2;
+
+    unsafe {
+        let hwnd = HWND(hwnd_raw as *mut std::ffi::c_void);
+        let hdc_window = GetWindowDC(Some(hwnd));
+        let hdc_mem = CreateCompatibleDC(Some(hdc_window));
+        let hbitmap = CreateCompatibleBitmap(hdc_window, width as i32, height as i32);
+        let old_obj = SelectObject(hdc_mem, hbitmap.into());
+
+        let ok = PrintWindow(
+            hwnd,
+            hdc_mem,
+            PRINT_WINDOW_FLAGS(PW_RENDERFULLCONTENT),
+        );
+
+        let buf = read_hbitmap(hdc_mem, hbitmap, width, height)?;
+
+        SelectObject(hdc_mem, old_obj);
+        let _ = DeleteObject(hbitmap.into());
+        let _ = DeleteDC(hdc_mem);
+        ReleaseDC(Some(hwnd), hdc_window);
+
+        if !ok.as_bool() {
+            bail!("PrintWindow failed for hwnd {hwnd_raw}");
+        }
+
+        RgbaImage::from_raw(width, height, buf)
+            .context("Failed to create image from PrintWindow capture")
+    }
+}
+
+/// Fallback: capture a screen region by BitBlt from the desktop DC.
+/// Used when PrintWindow fails. Captures whatever is visible on screen,
+/// so overlapping windows may bleed through.
+#[cfg(windows)]
+fn capture_screen_region(x: i32, y: i32, width: u32, height: u32) -> Result<RgbaImage> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Graphics::Gdi::{
+        BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetWindowDC,
+        ReleaseDC, SelectObject, SRCCOPY,
     };
 
     unsafe {
@@ -26,34 +114,7 @@ fn capture_screen_region(x: i32, y: i32, width: u32, height: u32) -> Result<Rgba
         BitBlt(hdc_mem, 0, 0, width as i32, height as i32, Some(hdc_screen), x, y, SRCCOPY)
             .context("BitBlt failed")?;
 
-        let mut bmi = BITMAPINFO {
-            bmiHeader: BITMAPINFOHEADER {
-                biSize: mem::size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: width as i32,
-                biHeight: -(height as i32),
-                biPlanes: 1,
-                biBitCount: 32,
-                biSizeImage: width * height * 4,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        let mut buf = vec![0u8; (width * height * 4) as usize];
-        GetDIBits(
-            hdc_mem,
-            hbitmap,
-            0,
-            height,
-            Some(buf.as_mut_ptr().cast()),
-            &mut bmi,
-            DIB_RGB_COLORS,
-        );
-
-        // BGRA → RGBA
-        for pixel in buf.chunks_exact_mut(4) {
-            pixel.swap(0, 2);
-        }
+        let buf = read_hbitmap(hdc_mem, hbitmap, width, height)?;
 
         SelectObject(hdc_mem, old_obj);
         let _ = DeleteObject(hbitmap.into());
@@ -183,11 +244,16 @@ fn capture_window(window: &Window) -> Result<(RgbaImage, u32, u32, WindowGeometr
     #[cfg(not(windows))]
     let dpi_scale = 1.0;
 
+    let cap_x = window.x().unwrap_or(0);
+    let cap_y = window.y().unwrap_or(0);
+    let cap_w = window.width().unwrap_or(0);
+    let cap_h = window.height().unwrap_or(0);
+
     let geom = WindowGeometry {
-        x: window.x().unwrap_or(0),
-        y: window.y().unwrap_or(0),
-        width: window.width().unwrap_or(0),
-        height: window.height().unwrap_or(0),
+        x: cap_x,
+        y: cap_y,
+        width: cap_w,
+        height: cap_h,
         dpi_scale,
     };
     eprintln!(
@@ -198,10 +264,20 @@ fn capture_window(window: &Window) -> Result<(RgbaImage, u32, u32, WindowGeometr
         geom.height,
         dpi_scale * 100.0
     );
-    // Use our own screen-region capture to include the full window with title bar.
-    // xcap's PrintWindow-based capture often crops the title bar on Windows 11.
+
+    // Primary: PrintWindow with PW_RENDERFULLCONTENT captures only the target window
+    // (no bleed-through from overlapping windows) and renders modern Win11 chrome.
+    // Fallback: BitBlt from screen if PrintWindow fails.
     #[cfg(windows)]
-    let img = capture_screen_region(geom.x, geom.y, geom.width, geom.height)?;
+    let img = {
+        match capture_window_printwindow(id, geom.width, geom.height) {
+            Ok(img) => img,
+            Err(e) => {
+                eprintln!("PrintWindow failed ({e:#}), falling back to screen capture");
+                capture_screen_region(geom.x, geom.y, geom.width, geom.height)?
+            }
+        }
+    };
     #[cfg(not(windows))]
     let img = window
         .capture_image()
