@@ -34,7 +34,7 @@ pub fn annotate(
     let font = FontRef::try_from_slice(FONT_BYTES).expect("Failed to load embedded font");
     let nodes = crate::tree::collect_annotatable_nodes(tree);
 
-    // Use the actual system DPI scale for UIA logical → physical conversion
+    // Use DPI scale for font sizing (larger fonts on high-DPI displays)
     let dpi = geom.dpi_scale;
     // Image pixels per physical pixel (should be ~1.0 since we capture at physical resolution)
     let img_scale_x = img.width() as f64 / geom.width.max(1) as f64;
@@ -49,13 +49,12 @@ pub fn annotate(
     for (id, rect, _role, _name) in &nodes {
         let color = COLORS[*id as usize % COLORS.len()];
 
-        // UIA logical → physical screen → image pixels
-        let phys_x = rect.x as f64 * dpi;
-        let phys_y = rect.y as f64 * dpi;
-        let px = ((phys_x - geom.x as f64) * img_scale_x) as i32;
-        let py = ((phys_y - geom.y as f64) * img_scale_y) as i32;
-        let pw = (rect.width as f64 * dpi * img_scale_x) as u32;
-        let ph = (rect.height as f64 * dpi * img_scale_y) as u32;
+        // UIA physical screen coords → image pixels
+        // (process is per-monitor DPI aware, so UIA coords are already physical)
+        let px = ((rect.x as f64 - geom.x as f64) * img_scale_x) as i32;
+        let py = ((rect.y as f64 - geom.y as f64) * img_scale_y) as i32;
+        let pw = (rect.width as f64 * img_scale_x) as u32;
+        let ph = (rect.height as f64 * img_scale_y) as u32;
 
         if pw == 0 || ph == 0 {
             continue;

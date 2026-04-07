@@ -227,6 +227,23 @@ pub struct WindowGeometry {
     pub dpi_scale: f64,
 }
 
+/// Get the full window rectangle (including invisible borders) via GetWindowRect.
+/// Returns physical pixel coordinates when the process is per-monitor DPI aware.
+#[cfg(windows)]
+fn get_window_rect(hwnd_raw: u32) -> Result<(i32, i32, u32, u32)> {
+    use windows::Win32::Foundation::{HWND, RECT};
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
+
+    unsafe {
+        let hwnd = HWND(hwnd_raw as *mut std::ffi::c_void);
+        let mut rect = RECT::default();
+        GetWindowRect(hwnd, &mut rect).context("GetWindowRect failed")?;
+        let w = (rect.right - rect.left).max(0) as u32;
+        let h = (rect.bottom - rect.top).max(0) as u32;
+        Ok((rect.left, rect.top, w, h))
+    }
+}
+
 /// Log and capture a screenshot from a window. Returns (image, pid, window_id, geometry).
 fn capture_window(window: &Window) -> Result<(RgbaImage, u32, u32, WindowGeometry)> {
     let pid = window.pid().unwrap_or(0);
@@ -266,11 +283,21 @@ fn capture_window(window: &Window) -> Result<(RgbaImage, u32, u32, WindowGeometr
 
     // Primary: PrintWindow with PW_RENDERFULLCONTENT captures only the target window
     // (no bleed-through from overlapping windows) and renders modern Win11 chrome.
+    // PrintWindow captures from GetWindowRect origin (includes invisible borders),
+    // so we capture at that size then crop to the DWM visible bounds.
     // Fallback: BitBlt from screen if PrintWindow fails.
     #[cfg(windows)]
     let img = {
-        match capture_window_printwindow(id, geom.width, geom.height) {
-            Ok(img) => img,
+        let (wr_x, wr_y, wr_w, wr_h) = get_window_rect(id)?;
+        match capture_window_printwindow(id, wr_w, wr_h) {
+            Ok(pw_img) => {
+                // Crop invisible borders: DWM bounds are inside GetWindowRect
+                let crop_x = (geom.x - wr_x).max(0) as u32;
+                let crop_y = (geom.y - wr_y).max(0) as u32;
+                let crop_w = geom.width.min(wr_w.saturating_sub(crop_x));
+                let crop_h = geom.height.min(wr_h.saturating_sub(crop_y));
+                image::imageops::crop_imm(&pw_img, crop_x, crop_y, crop_w, crop_h).to_image()
+            }
             Err(e) => {
                 eprintln!("PrintWindow failed ({e:#}), falling back to screen capture");
                 capture_screen_region(geom.x, geom.y, geom.width, geom.height)?

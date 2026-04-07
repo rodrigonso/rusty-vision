@@ -78,6 +78,18 @@ fn downscale(img: RgbaImage, max_width: Option<u32>) -> RgbaImage {
 }
 
 fn main() -> Result<()> {
+    // Ensure all Windows APIs (GetWindowRect, UIA, etc.) return physical pixel
+    // coordinates, matching xcap's DWM-based coordinate system.
+    #[cfg(windows)]
+    {
+        use windows::Win32::UI::HiDpi::{
+            SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+        };
+        unsafe {
+            let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        }
+    }
+
     let cli = Cli::parse();
 
     match cli.command {
